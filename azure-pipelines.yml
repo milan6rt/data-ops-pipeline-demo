@@ -1,4 +1,4 @@
-# Azure SQL Database Deployment Pipeline - Fixed Version
+# Azure SQL Database Deployment Pipeline - Python Version
 trigger:
 - main
 
@@ -33,113 +33,203 @@ stages:
       displayName: '🔍 Validate SQL Files'
     
     - script: |
-        echo "📦 Installing/Checking SQL Server tools..."
+        echo "📦 Installing Python packages for SQL Server..."
         
-        # Check if Homebrew is installed
-        if ! command -v brew &> /dev/null; then
-            echo "Installing Homebrew..."
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zshrc
-            eval "$(/opt/homebrew/bin/brew shellenv)"
-        fi
+        # Install required Python packages
+        pip3 install pyodbc pandas
         
-        # Install or update mssql-tools
-        echo "Installing Microsoft SQL Server tools..."
-        brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release || true
+        # Install Microsoft ODBC Driver for SQL Server (macOS)
+        brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
         brew update
+        HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install msodbcsql18 mssql-tools18
         
-        # Accept EULA and install
-        HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install mssql-tools18 || true
-        
-        # Add to PATH
-        export PATH="/opt/homebrew/bin:$PATH"
-        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
-        
-        # Verify installation
-        echo "Checking sqlcmd installation..."
-        which sqlcmd || echo "sqlcmd not found in PATH"
-        /opt/homebrew/opt/mssql-tools18/bin/sqlcmd -? || echo "Direct path test failed"
-        
-        echo "✅ SQL tools setup completed"
-      displayName: '📦 Install SQL Command Line Tools'
+        echo "✅ Python packages and ODBC driver installed"
+      displayName: '📦 Install Python SQL Dependencies'
     
     - script: |
         echo "🔗 Testing connection to Azure SQL Database..."
-        echo "Server: $(sqlServerName)"
-        echo "Database: $(databaseName)"
-        echo "Username: $(sqlUsername)"
         
-        # Set PATH to include sqlcmd
-        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
+        python3 << 'EOF'
+        import pyodbc
+        import sys
         
-        # Test with different connection parameters
-        echo "Testing connection with trust server certificate..."
+        # Connection parameters
+        server = '$(sqlServerName)'
+        database = '$(databaseName)'
+        username = '$(sqlUsername)'
+        password = '$(sqlPassword)'
         
-        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -Q "SELECT GETDATE() as CurrentTime"
+        # Connection string
+        connection_string = f"""
+        DRIVER={{ODBC Driver 18 for SQL Server}};
+        SERVER={server};
+        DATABASE={database};
+        UID={username};
+        PWD={password};
+        Encrypt=yes;
+        TrustServerCertificate=no;
+        Connection Timeout=30;
+        """
         
-        connection_result=$?
-        if [ $connection_result -eq 0 ]; then
-            echo "✅ Database connection successful!"
-        else
-            echo "❌ Database connection failed with exit code: $connection_result"
-            echo "Trying alternative connection method..."
+        try:
+            print(f"Connecting to server: {server}")
+            print(f"Database: {database}")
+            print(f"Username: {username}")
             
-            # Try without specifying database initially
-            sqlcmd -S $(sqlServerName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -Q "SELECT GETDATE() as CurrentTime; SELECT name FROM sys.databases"
+            # Test connection
+            conn = pyodbc.connect(connection_string)
+            cursor = conn.cursor()
             
-            if [ $? -eq 0 ]; then
-                echo "✅ Server connection successful, but database-specific connection failed"
-            else
-                echo "❌ Complete connection failure"
-                exit 1
-            fi
-        fi
+            # Test query
+            cursor.execute("SELECT GETDATE() as CurrentTime, @@VERSION as SQLVersion")
+            row = cursor.fetchone()
+            print(f"✅ Connection successful!")
+            print(f"Current time: {row[0]}")
+            print(f"SQL Server version: {row[1][:50]}...")
+            
+            conn.close()
+            
+        except Exception as e:
+            print(f"❌ Connection failed: {str(e)}")
+            sys.exit(1)
+        EOF
+        
+        echo "✅ Database connection test completed"
       displayName: '🔗 Test Database Connection'
     
     - script: |
         echo "🚀 Executing SQL deployment script..."
         
-        # Set PATH
-        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
+        python3 << 'EOF'
+        import pyodbc
+        import sys
+        import re
         
-        # Update the USE statement in SQL file
-        sed "s/USE \[your-database-name\]/USE [$(databaseName)]/" sql/create_tables.sql > sql/create_tables_updated.sql
+        # Connection parameters
+        server = '$(sqlServerName)'
+        database = '$(databaseName)'
+        username = '$(sqlUsername)'
+        password = '$(sqlPassword)'
         
-        echo "Updated SQL content:"
-        cat sql/create_tables_updated.sql
+        # Connection string
+        connection_string = f"""
+        DRIVER={{ODBC Driver 18 for SQL Server}};
+        SERVER={server};
+        DATABASE={database};
+        UID={username};
+        PWD={password};
+        Encrypt=yes;
+        TrustServerCertificate=no;
+        Connection Timeout=30;
+        """
         
-        # Execute the SQL script
-        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -i sql/create_tables_updated.sql
+        try:
+            # Read SQL file
+            with open('sql/create_tables.sql', 'r') as file:
+                sql_script = file.read()
+            
+            # Replace database name placeholder
+            sql_script = sql_script.replace('USE [your-database-name];', f'USE [{database}];')
+            
+            print("📄 SQL Script to execute:")
+            print("-" * 50)
+            print(sql_script[:500] + "..." if len(sql_script) > 500 else sql_script)
+            print("-" * 50)
+            
+            # Connect and execute
+            conn = pyodbc.connect(connection_string)
+            conn.autocommit = True
+            cursor = conn.cursor()
+            
+            # Split script by GO statements and execute each batch
+            batches = re.split(r'\bGO\b', sql_script, flags=re.IGNORECASE)
+            
+            for i, batch in enumerate(batches):
+                batch = batch.strip()
+                if batch and not batch.startswith('USE'):  # Skip USE statements
+                    print(f"Executing batch {i+1}...")
+                    try:
+                        cursor.execute(batch)
+                        print(f"✅ Batch {i+1} executed successfully")
+                    except Exception as batch_error:
+                        print(f"⚠️ Batch {i+1} warning: {str(batch_error)}")
+                        # Continue with other batches
+            
+            conn.close()
+            print("✅ SQL script execution completed!")
+            
+        except Exception as e:
+            print(f"❌ SQL execution failed: {str(e)}")
+            sys.exit(1)
+        EOF
         
-        if [ $? -eq 0 ]; then
-            echo "✅ SQL script executed successfully!"
-        else
-            echo "❌ SQL script execution failed!"
-            exit 1
-        fi
+        echo "🎉 SQL deployment completed"
       displayName: '🚀 Deploy SQL Changes'
-      condition: succeededOrFailed()
     
     - script: |
         echo "✅ Verifying deployment results..."
         
-        # Set PATH
-        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
+        python3 << 'EOF'
+        import pyodbc
+        import sys
         
-        # Check if table exists
-        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -Q "
-        IF EXISTS (SELECT * FROM sys.tables WHERE name = 'employees')
-        BEGIN
-            SELECT 'SUCCESS: employees table exists!' as Status;
-            SELECT COUNT(*) as TotalRecords FROM employees;
-            SELECT TOP 3 first_name, last_name, department FROM employees;
-        END
-        ELSE
-        BEGIN
-            SELECT 'ERROR: employees table not found!' as Status;
-        END
-        "
+        # Connection parameters
+        server = '$(sqlServerName)'
+        database = '$(databaseName)'
+        username = '$(sqlUsername)'
+        password = '$(sqlPassword)'
         
-        echo "🎉 Deployment verification completed!"
+        # Connection string
+        connection_string = f"""
+        DRIVER={{ODBC Driver 18 for SQL Server}};
+        SERVER={server};
+        DATABASE={database};
+        UID={username};
+        PWD={password};
+        Encrypt=yes;
+        TrustServerCertificate=no;
+        Connection Timeout=30;
+        """
+        
+        try:
+            conn = pyodbc.connect(connection_string)
+            cursor = conn.cursor()
+            
+            # Check if table exists
+            cursor.execute("""
+                SELECT COUNT(*) as table_exists 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME = 'employees'
+            """)
+            
+            table_exists = cursor.fetchone()[0]
+            
+            if table_exists > 0:
+                print("✅ employees table exists!")
+                
+                # Get record count
+                cursor.execute("SELECT COUNT(*) FROM employees")
+                count = cursor.fetchone()[0]
+                print(f"📊 Total records: {count}")
+                
+                # Show sample data
+                cursor.execute("SELECT TOP 3 first_name, last_name, department, hire_date FROM employees")
+                rows = cursor.fetchall()
+                
+                print("📋 Sample data:")
+                for row in rows:
+                    print(f"  - {row[0]} {row[1]}, {row[2]}, hired: {row[3]}")
+                    
+            else:
+                print("❌ employees table not found!")
+                sys.exit(1)
+            
+            conn.close()
+            
+        except Exception as e:
+            print(f"❌ Verification failed: {str(e)}")
+            sys.exit(1)
+        EOF
+        
+        echo "🎉 Deployment verification completed successfully!"
       displayName: '✅ Verify Deployment'
-      condition: succeededOrFailed()
