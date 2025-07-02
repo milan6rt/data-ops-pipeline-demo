@@ -1,5 +1,6 @@
 -- Employee table creation script for data ops pipeline demo
 -- This script will be executed automatically when changes are pushed to GitHub
+#This is just a comment
 
 USE [your-database-name];  -- We'll update this later with actual database name
 GO
