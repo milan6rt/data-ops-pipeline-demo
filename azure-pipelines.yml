@@ -1,0 +1,110 @@
+# Azure SQL Database Deployment Pipeline
+# Automatically deploys SQL changes when code is pushed to main branch
+
+trigger:
+- main  # Run pipeline when changes are pushed to main branch
+
+pool:
+  name: 'Default'  # Use your Mac self-hosted agent
+
+variables:
+  # Database connection details (we'll set these as pipeline variables)
+  sqlServerName: 'sqlserver-dataops-demo-milan.database.windows.net'
+  databaseName: 'db-employees-demo'
+  # sqlUsername and sqlPassword will be set as secret variables
+
+stages:
+- stage: ValidateAndDeploy
+  displayName: 'Validate and Deploy SQL Changes'
+  jobs:
+  - job: DeploySQL
+    displayName: 'Deploy SQL to Azure Database'
+    steps:
+    
+    - checkout: self
+      displayName: '📥 Get SQL files from GitHub'
+    
+    - script: |
+        echo "🔍 Validating SQL files..."
+        echo "Repository structure:"
+        find . -name "*.sql" -type f
+        echo ""
+        echo "📄 SQL files found:"
+        ls -la sql/
+        echo ""
+        echo "📝 Content preview of create_tables.sql:"
+        head -10 sql/create_tables.sql
+      displayName: '🔍 Validate SQL Files'
+    
+    - script: |
+        echo "📦 Installing SQL Server tools..."
+        # Check if sqlcmd is already installed
+        if command -v sqlcmd &> /dev/null; then
+            echo "✅ sqlcmd already installed"
+            sqlcmd -?
+        else
+            echo "📥 Installing Microsoft SQL Server tools..."
+            # Install Microsoft SQL Server tools for macOS
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || echo "Homebrew already installed"
+            brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+            brew update
+            HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install mssql-tools18
+            echo "✅ SQL tools installed successfully"
+        fi
+      displayName: '📦 Install SQL Command Line Tools'
+    
+    - script: |
+        echo "🔗 Testing connection to Azure SQL Database..."
+        echo "Server: $(sqlServerName)"
+        echo "Database: $(databaseName)"
+        echo "Username: $(sqlUsername)"
+        
+        # Test connection with a simple query
+        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -Q "SELECT GETDATE() as CurrentTime, @@VERSION as SQLVersion"
+        
+        if [ $? -eq 0 ]; then
+            echo "✅ Database connection successful!"
+        else
+            echo "❌ Database connection failed!"
+            exit 1
+        fi
+      displayName: '🔗 Test Database Connection'
+    
+    - script: |
+        echo "🚀 Executing SQL deployment script..."
+        echo "Deploying: sql/create_tables.sql"
+        
+        # Update the USE statement in SQL file to use our actual database name
+        sed "s/USE \[your-database-name\]/USE [$(databaseName)]/" sql/create_tables.sql > sql/create_tables_updated.sql
+        
+        # Execute the SQL script
+        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -i sql/create_tables_updated.sql
+        
+        if [ $? -eq 0 ]; then
+            echo "✅ SQL script executed successfully!"
+        else
+            echo "❌ SQL script execution failed!"
+            exit 1
+        fi
+      displayName: '🚀 Deploy SQL Changes'
+    
+    - script: |
+        echo "✅ Verifying deployment results..."
+        echo "Checking if employees table was created..."
+        
+        # Check if table exists and show record count
+        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -Q "
+        IF EXISTS (SELECT * FROM sys.tables WHERE name = 'employees')
+        BEGIN
+            SELECT 'SUCCESS: employees table exists!' as Status
+            SELECT COUNT(*) as TotalRecords FROM employees
+            SELECT TOP 3 * FROM employees
+        END
+        ELSE
+        BEGIN
+            SELECT 'ERROR: employees table not found!' as Status
+        END
+        "
+        
+        echo "🎉 Deployment verification completed!"
+      displayName: '✅ Verify Deployment'
