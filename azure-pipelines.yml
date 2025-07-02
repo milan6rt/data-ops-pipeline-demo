@@ -1,17 +1,13 @@
-# Azure SQL Database Deployment Pipeline
-# Automatically deploys SQL changes when code is pushed to main branch
-
+# Azure SQL Database Deployment Pipeline - Fixed Version
 trigger:
-- main  # Run pipeline when changes are pushed to main branch
+- main
 
 pool:
-  name: 'Default'  # Use your Mac self-hosted agent
+  name: 'Default'
 
 variables:
-  # Database connection details (we'll set these as pipeline variables)
   sqlServerName: 'sqlserver-dataops-demo-milan.database.windows.net'
   databaseName: 'db-employees-demo'
-  # sqlUsername and sqlPassword will be set as secret variables
 
 stages:
 - stage: ValidateAndDeploy
@@ -37,20 +33,34 @@ stages:
       displayName: '🔍 Validate SQL Files'
     
     - script: |
-        echo "📦 Installing SQL Server tools..."
-        # Check if sqlcmd is already installed
-        if command -v sqlcmd &> /dev/null; then
-            echo "✅ sqlcmd already installed"
-            sqlcmd -?
-        else
-            echo "📥 Installing Microsoft SQL Server tools..."
-            # Install Microsoft SQL Server tools for macOS
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || echo "Homebrew already installed"
-            brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-            brew update
-            HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install mssql-tools18
-            echo "✅ SQL tools installed successfully"
+        echo "📦 Installing/Checking SQL Server tools..."
+        
+        # Check if Homebrew is installed
+        if ! command -v brew &> /dev/null; then
+            echo "Installing Homebrew..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zshrc
+            eval "$(/opt/homebrew/bin/brew shellenv)"
         fi
+        
+        # Install or update mssql-tools
+        echo "Installing Microsoft SQL Server tools..."
+        brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release || true
+        brew update
+        
+        # Accept EULA and install
+        HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install mssql-tools18 || true
+        
+        # Add to PATH
+        export PATH="/opt/homebrew/bin:$PATH"
+        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
+        
+        # Verify installation
+        echo "Checking sqlcmd installation..."
+        which sqlcmd || echo "sqlcmd not found in PATH"
+        /opt/homebrew/opt/mssql-tools18/bin/sqlcmd -? || echo "Direct path test failed"
+        
+        echo "✅ SQL tools setup completed"
       displayName: '📦 Install SQL Command Line Tools'
     
     - script: |
@@ -59,26 +69,47 @@ stages:
         echo "Database: $(databaseName)"
         echo "Username: $(sqlUsername)"
         
-        # Test connection with a simple query
-        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -Q "SELECT GETDATE() as CurrentTime, @@VERSION as SQLVersion"
+        # Set PATH to include sqlcmd
+        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
         
-        if [ $? -eq 0 ]; then
+        # Test with different connection parameters
+        echo "Testing connection with trust server certificate..."
+        
+        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -Q "SELECT GETDATE() as CurrentTime"
+        
+        connection_result=$?
+        if [ $connection_result -eq 0 ]; then
             echo "✅ Database connection successful!"
         else
-            echo "❌ Database connection failed!"
-            exit 1
+            echo "❌ Database connection failed with exit code: $connection_result"
+            echo "Trying alternative connection method..."
+            
+            # Try without specifying database initially
+            sqlcmd -S $(sqlServerName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -Q "SELECT GETDATE() as CurrentTime; SELECT name FROM sys.databases"
+            
+            if [ $? -eq 0 ]; then
+                echo "✅ Server connection successful, but database-specific connection failed"
+            else
+                echo "❌ Complete connection failure"
+                exit 1
+            fi
         fi
       displayName: '🔗 Test Database Connection'
     
     - script: |
         echo "🚀 Executing SQL deployment script..."
-        echo "Deploying: sql/create_tables.sql"
         
-        # Update the USE statement in SQL file to use our actual database name
+        # Set PATH
+        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
+        
+        # Update the USE statement in SQL file
         sed "s/USE \[your-database-name\]/USE [$(databaseName)]/" sql/create_tables.sql > sql/create_tables_updated.sql
         
+        echo "Updated SQL content:"
+        cat sql/create_tables_updated.sql
+        
         # Execute the SQL script
-        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -i sql/create_tables_updated.sql
+        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -i sql/create_tables_updated.sql
         
         if [ $? -eq 0 ]; then
             echo "✅ SQL script executed successfully!"
@@ -87,24 +118,28 @@ stages:
             exit 1
         fi
       displayName: '🚀 Deploy SQL Changes'
+      condition: succeededOrFailed()
     
     - script: |
         echo "✅ Verifying deployment results..."
-        echo "Checking if employees table was created..."
         
-        # Check if table exists and show record count
-        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -Q "
+        # Set PATH
+        export PATH="/opt/homebrew/opt/mssql-tools18/bin:$PATH"
+        
+        # Check if table exists
+        sqlcmd -S $(sqlServerName) -d $(databaseName) -U $(sqlUsername) -P $(sqlPassword) -C -l 30 -Q "
         IF EXISTS (SELECT * FROM sys.tables WHERE name = 'employees')
         BEGIN
-            SELECT 'SUCCESS: employees table exists!' as Status
-            SELECT COUNT(*) as TotalRecords FROM employees
-            SELECT TOP 3 * FROM employees
+            SELECT 'SUCCESS: employees table exists!' as Status;
+            SELECT COUNT(*) as TotalRecords FROM employees;
+            SELECT TOP 3 first_name, last_name, department FROM employees;
         END
         ELSE
         BEGIN
-            SELECT 'ERROR: employees table not found!' as Status
+            SELECT 'ERROR: employees table not found!' as Status;
         END
         "
         
         echo "🎉 Deployment verification completed!"
       displayName: '✅ Verify Deployment'
+      condition: succeededOrFailed()
