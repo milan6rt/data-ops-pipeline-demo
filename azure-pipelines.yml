@@ -1,4 +1,4 @@
-# Azure SQL Database Deployment Pipeline - Python Version
+# Azure SQL Database Deployment Pipeline - pymssql Version
 trigger:
 - main
 
@@ -29,28 +29,23 @@ stages:
         ls -la sql/
         echo ""
         echo "📝 Content preview of create_tables.sql:"
-        head -10 sql/create_tables.sql
+        head -15 sql/create_tables.sql
       displayName: '🔍 Validate SQL Files'
     
     - script: |
         echo "📦 Installing Python packages for SQL Server..."
         
-        # Install required Python packages
-        pip3 install pyodbc pandas
+        # Install required Python packages (pymssql instead of pyodbc)
+        pip3 install pymssql sqlalchemy pandas
         
-        # Install Microsoft ODBC Driver for SQL Server (macOS)
-        brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-        brew update
-        HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install msodbcsql18 mssql-tools18
-        
-        echo "✅ Python packages and ODBC driver installed"
+        echo "✅ Python packages installed successfully"
       displayName: '📦 Install Python SQL Dependencies'
     
     - script: |
         echo "🔗 Testing connection to Azure SQL Database..."
         
         python3 << 'EOF'
-        import pyodbc
+        import pymssql
         import sys
         
         # Connection parameters
@@ -59,25 +54,21 @@ stages:
         username = '$(sqlUsername)'
         password = '$(sqlPassword)'
         
-        # Connection string
-        connection_string = f"""
-        DRIVER={{ODBC Driver 18 for SQL Server}};
-        SERVER={server};
-        DATABASE={database};
-        UID={username};
-        PWD={password};
-        Encrypt=yes;
-        TrustServerCertificate=no;
-        Connection Timeout=30;
-        """
-        
         try:
             print(f"Connecting to server: {server}")
             print(f"Database: {database}")
             print(f"Username: {username}")
             
             # Test connection
-            conn = pyodbc.connect(connection_string)
+            conn = pymssql.connect(
+                server=server,
+                user=username,
+                password=password,
+                database=database,
+                timeout=30,
+                login_timeout=30
+            )
+            
             cursor = conn.cursor()
             
             # Test query
@@ -101,7 +92,7 @@ stages:
         echo "🚀 Executing SQL deployment script..."
         
         python3 << 'EOF'
-        import pyodbc
+        import pymssql
         import sys
         import re
         
@@ -110,18 +101,6 @@ stages:
         database = '$(databaseName)'
         username = '$(sqlUsername)'
         password = '$(sqlPassword)'
-        
-        # Connection string
-        connection_string = f"""
-        DRIVER={{ODBC Driver 18 for SQL Server}};
-        SERVER={server};
-        DATABASE={database};
-        UID={username};
-        PWD={password};
-        Encrypt=yes;
-        TrustServerCertificate=no;
-        Connection Timeout=30;
-        """
         
         try:
             # Read SQL file
@@ -133,12 +112,19 @@ stages:
             
             print("📄 SQL Script to execute:")
             print("-" * 50)
-            print(sql_script[:500] + "..." if len(sql_script) > 500 else sql_script)
+            print(sql_script[:800] + "..." if len(sql_script) > 800 else sql_script)
             print("-" * 50)
             
             # Connect and execute
-            conn = pyodbc.connect(connection_string)
-            conn.autocommit = True
+            conn = pymssql.connect(
+                server=server,
+                user=username,
+                password=password,
+                database=database,
+                timeout=30,
+                login_timeout=30
+            )
+            
             cursor = conn.cursor()
             
             # Split script by GO statements and execute each batch
@@ -146,10 +132,11 @@ stages:
             
             for i, batch in enumerate(batches):
                 batch = batch.strip()
-                if batch and not batch.startswith('USE'):  # Skip USE statements
+                if batch and not batch.upper().startswith('USE'):  # Skip USE statements
                     print(f"Executing batch {i+1}...")
                     try:
                         cursor.execute(batch)
+                        conn.commit()
                         print(f"✅ Batch {i+1} executed successfully")
                     except Exception as batch_error:
                         print(f"⚠️ Batch {i+1} warning: {str(batch_error)}")
@@ -170,7 +157,7 @@ stages:
         echo "✅ Verifying deployment results..."
         
         python3 << 'EOF'
-        import pyodbc
+        import pymssql
         import sys
         
         # Connection parameters
@@ -179,20 +166,16 @@ stages:
         username = '$(sqlUsername)'
         password = '$(sqlPassword)'
         
-        # Connection string
-        connection_string = f"""
-        DRIVER={{ODBC Driver 18 for SQL Server}};
-        SERVER={server};
-        DATABASE={database};
-        UID={username};
-        PWD={password};
-        Encrypt=yes;
-        TrustServerCertificate=no;
-        Connection Timeout=30;
-        """
-        
         try:
-            conn = pyodbc.connect(connection_string)
+            conn = pymssql.connect(
+                server=server,
+                user=username,
+                password=password,
+                database=database,
+                timeout=30,
+                login_timeout=30
+            )
+            
             cursor = conn.cursor()
             
             # Check if table exists
@@ -222,6 +205,11 @@ stages:
                     
             else:
                 print("❌ employees table not found!")
+                # Show what tables do exist
+                cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
+                tables = cursor.fetchall()
+                table_names = [table[0] for table in tables]
+                print(f"Available tables: {table_names}")
                 sys.exit(1)
             
             conn.close()
